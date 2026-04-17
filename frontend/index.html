@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Adaptive Soundscapes</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif;
+        background: radial-gradient(circle at 20% 20%, #13243e, #0a0f1a 60%);
+        color: #e9eef7;
+      }
+      .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+      h1 { margin-bottom: .25rem; }
+      .sub { opacity: .8; margin-top: 0; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+      .card { background: #101827cc; border: 1px solid #2a3b57; border-radius: 14px; padding: 1rem; }
+      label { display:block; margin: .7rem 0 .3rem; font-size: .92rem; }
+      input[type="range"] { width: 100%; }
+      .mode {
+        font-size: 1.2rem; font-weight: 650;
+        display: inline-block; padding: .3rem .7rem;
+        border-radius: 999px; background: #1c2b44;
+      }
+      button {
+        border: none; border-radius: 10px; padding: .7rem 1rem;
+        cursor: pointer; font-weight: 650;
+      }
+      .primary { background:#6fa7ff; color:#081427; }
+      .secondary { background:#1c2b44; color:#dbe8ff; }
+      code { background:#1d2941; padding: .15rem .35rem; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Adaptive Soundscapes for Productivity</h1>
+      <p class="sub">Ambient audio adapts from keyboard/mouse rhythm + self-reported state.</p>
+
+      <div class="grid">
+        <section class="card">
+          <h3>Controls</h3>
+          <button id="startBtn" class="primary">Start Soundscape</button>
+          <button id="stopBtn" class="secondary">Stop</button>
+
+          <label for="posture">Posture score (manual)</label>
+          <input id="posture" type="range" min="0" max="1" step="0.01" value="0.7"/>
+
+          <label for="eye">Eye focus score (manual)</label>
+          <input id="eye" type="range" min="0" max="1" step="0.01" value="0.75"/>
+
+          <label for="stress">Stress report</label>
+          <input id="stress" type="range" min="0" max="1" step="0.01" value="0.2"/>
+
+          <p>Tip: Type in this page to generate real typing rhythm data.</p>
+        </section>
+
+        <section class="card">
+          <h3>Status</h3>
+          <p>Mode: <span id="mode" class="mode">neutral</span></p>
+          <p>Typing CPM: <code id="typing">0</code></p>
+          <p>Typing variability: <code id="variability">0</code></p>
+          <p>Mouse speed: <code id="mouse">0</code></p>
+          <p>Audio preset: <code id="preset">-</code></p>
+        </section>
+      </div>
+    </div>
+
+    <script>
+      const modeEl = document.getElementById("mode");
+      const typingEl = document.getElementById("typing");
+      const variabilityEl = document.getElementById("variability");
+      const mouseEl = document.getElementById("mouse");
+      const presetEl = document.getElementById("preset");
+
+      let keyTimestamps = [];
+      let mouseSamples = [];
+      let lastMouse = null;
+      let timer = null;
+
+      document.addEventListener("keydown", () => {
+        keyTimestamps.push(performance.now());
+        const cutoff = performance.now() - 60000;
+        keyTimestamps = keyTimestamps.filter(t => t > cutoff);
+      });
+
+      document.addEventListener("mousemove", (e) => {
+        const now = performance.now();
+        if (lastMouse) {
+          const dt = (now - lastMouse.t) / 1000;
+          const dx = e.clientX - lastMouse.x;
+          const dy = e.clientY - lastMouse.y;
+          const speed = Math.sqrt(dx*dx + dy*dy) / Math.max(dt, 0.01);
+          mouseSamples.push({ t: now, speed });
+          const cutoff = now - 8000;
+          mouseSamples = mouseSamples.filter(s => s.t > cutoff);
+        }
+        lastMouse = { x: e.clientX, y: e.clientY, t: now };
+      });
+
+      function typingStats() {
+        const now = performance.now();
+        const oneMin = keyTimestamps.filter(t => t > now - 60000);
+        const cpm = oneMin.length;
+        if (oneMin.length < 3) return { cpm, variability: 0.5 };
+        const intervals = [];
+        for (let i=1; i < oneMin.length; i++) intervals.push(oneMin[i]-oneMin[i-1]);
+        const avg = intervals.reduce((a,b)=>a+b,0) / intervals.length;
+        const variance = intervals.reduce((a,b)=>a+(b-avg)**2,0)/intervals.length;
+        const stdev = Math.sqrt(variance);
+        const normalized = Math.min(stdev / Math.max(avg, 1), 1);
+        return { cpm, variability: normalized };
+      }
+
+      function averageMouseSpeed() {
+        if (!mouseSamples.length) return 0;
+        return mouseSamples.reduce((a,s)=>a+s.speed,0) / mouseSamples.length;
+      }
+
+      // Simple WebAudio ambient generator
+      let audioCtx, noiseNode, gainNode, filterNode;
+      function createBrownNoise(context) {
+        const bufferSize = 2 * context.sampleRate;
+        const buffer = context.createBuffer(1, bufferSize, context.sampleRate);
+        const data = buffer.getChannelData(0);
+        let lastOut = 0.0;
+        for (let i = 0; i < bufferSize; i++) {
+          const white = Math.random() * 2 - 1;
+          data[i] = (lastOut + (0.02 * white)) / 1.02;
+          lastOut = data[i];
+          data[i] *= 3.5;
+        }
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        source.loop = true;
+        return source;
+      }
+
+      function startAudio() {
+        if (audioCtx) return;
+        audioCtx = new AudioContext();
+        noiseNode = createBrownNoise(audioCtx);
+        filterNode = audioCtx.createBiquadFilter();
+        filterNode.type = "lowpass";
+        filterNode.frequency.value = 1200;
+        gainNode = audioCtx.createGain();
+        gainNode.gain.value = 0.0001;
+        noiseNode.connect(filterNode).connect(gainNode).connect(audioCtx.destination);
+        noiseNode.start();
+      }
+
+      function stopAudio() {
+        if (!audioCtx) return;
+        noiseNode.stop();
+        audioCtx.close();
+        audioCtx = null;
+      }
+
+      function applyPreset(audio) {
+        if (!audioCtx || !gainNode || !filterNode) return;
+        const now = audioCtx.currentTime;
+        const sec = Math.max((audio.transition_ms || 12000) / 1000, 2);
+        gainNode.gain.cancelScheduledValues(now);
+        gainNode.gain.linearRampToValueAtTime(audio.volume, now + sec);
+        const hz = 300 + (audio.brightness * 2500);
+        filterNode.frequency.cancelScheduledValues(now);
+        filterNode.frequency.linearRampToValueAtTime(hz, now + sec);
+      }
+
+      async function tick() {
+        const { cpm, variability } = typingStats();
+        const mouseSpeed = averageMouseSpeed();
+        typingEl.textContent = cpm.toFixed(0);
+        variabilityEl.textContent = variability.toFixed(2);
+        mouseEl.textContent = mouseSpeed.toFixed(1);
+
+        const payload = {
+          typing_cpm: cpm,
+          typing_variability: variability,
+          mouse_speed: mouseSpeed,
+          posture_score: parseFloat(document.getElementById("posture").value),
+          eye_focus_score: parseFloat(document.getElementById("eye").value),
+          stress_self_report: parseFloat(document.getElementById("stress").value),
+        };
+
+        const res = await fetch('/api/adapt', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        modeEl.textContent = data.mode;
+        presetEl.textContent = JSON.stringify(data.audio);
+        applyPreset(data.audio);
+      }
+
+      document.getElementById("startBtn").addEventListener("click", async () => {
+        startAudio();
+        await tick();
+        if (timer) clearInterval(timer);
+        timer = setInterval(tick, 5000);
+      });
+
+      document.getElementById("stopBtn").addEventListener("click", () => {
+        if (timer) clearInterval(timer);
+        stopAudio();
+      });
+    </script>
+  </body>
+</html>
